@@ -1,3 +1,11 @@
+// 基于 redis 实现分布式版本的时间轮
+//
+// 使用 redis 中的有序集合 sorted set（简称 zset） 进行定时任务的存储管理.
+// 其中以每个定时任务执行时间对应的时间戳作为 zset 中的 score，完成定时任务的有序排列组合.
+//
+// 1. 分钟级时间分片；
+// 2. 惰性删除机制，用一个set集合存储已删除的任务，每次执行任务时，先检查是否已被删除。
+
 package timewheel
 
 import (
@@ -17,27 +25,30 @@ import (
 )
 
 type RTaskElement struct {
-	Key         string            `json:"key"`
-	CallbackURL string            `json:"callback_url"`
+	Key string `json:"key"`
+
+	CallbackURL string            `json:"callback_url"` // 定时任务执行时，回调的 http url
 	Method      string            `json:"method"`
 	Req         interface{}       `json:"req"`
 	Header      map[string]string `json:"header"`
 }
 
 type RTimeWheel struct {
-	sync.Once
-	redisClient *redis.Client
-	httpClient  *thttp.Client
-	stopc       chan struct{}
-	ticker      *time.Ticker
+	sync.Once // 用于保证 stopc 只被关闭一次
+
+	redisClient *redis.Client // 定时任务的存储是基于 redis zset 实现的
+	httpClient  *thttp.Client // 定时任务执行时，是通过请求使用方预留回调地址的方式实现的
+
+	stopc  chan struct{} // 用于停止时间轮的控制器 channel
+	ticker *time.Ticker  // 触发定时扫描任务的定时器
 }
 
 func NewRTimeWheel(redisClient *redis.Client, httpClient *thttp.Client) *RTimeWheel {
 	r := RTimeWheel{
-		ticker:      time.NewTicker(time.Second),
 		redisClient: redisClient,
 		httpClient:  httpClient,
 		stopc:       make(chan struct{}),
+		ticker:      time.NewTicker(time.Second),
 	}
 
 	go r.run()
