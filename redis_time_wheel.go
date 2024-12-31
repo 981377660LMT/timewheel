@@ -3,7 +3,7 @@
 // 使用 redis 中的有序集合 sorted set（简称 zset） 进行定时任务的存储管理.
 // 其中以每个定时任务执行时间对应的时间戳作为 zset 中的 score，完成定时任务的有序排列组合.
 //
-// 1. 分钟级时间分片；
+// 1. 分钟级时间分片，避免产生 redis 大 key 问题；
 // 2. 惰性删除机制，用一个set集合存储已删除的任务，每次执行任务时，先检查是否已被删除。
 
 package timewheel
@@ -84,6 +84,7 @@ func (r *RTimeWheel) AddTask(ctx context.Context, key string, task *RTaskElement
 	return err
 }
 
+// 将定时任务追加到分钟级的已删除任务 set 中. 之后在检索定时任务时，会根据这个 set 对定时任务进行过滤，实现惰性删除机制
 func (r *RTimeWheel) RemoveTask(ctx context.Context, key string, executeAt time.Time) error {
 	// 标识任务已被删除
 	_, err := r.redisClient.Eval(ctx, LuaDeleteTask, 1, []interface{}{
@@ -112,16 +113,17 @@ func (r *RTimeWheel) executeTasks() {
 		}
 	}()
 
-	// 并发控制，30 s
+	// 并发控制，保证 30 s 之内完成该批次全量任务的执行，及时回收 goroutine，避免发生 goroutine 泄漏
 	tctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
+	// 根据当前时间条件扫描 redis zset，获取所有满足执行条件的定时任务
 	tasks, err := r.getExecutableTasks(tctx)
 	if err != nil {
 		// log
 		return
 	}
 
-	// 并发执行任务
+	// 并发执行任务，通过 waitGroup 进行聚合收口
 	var wg sync.WaitGroup
 	for _, task := range tasks {
 		wg.Add(1)
@@ -133,6 +135,7 @@ func (r *RTimeWheel) executeTasks() {
 				}
 				wg.Done()
 			}()
+			// 执行定时任务
 			if err := r.executeTask(tctx, task); err != nil {
 				// log
 			}
@@ -155,6 +158,7 @@ func (r *RTimeWheel) addTaskPrecheck(task *RTaskElement) error {
 	return nil
 }
 
+// !检索定时任务
 func (r *RTimeWheel) getExecutableTasks(ctx context.Context) ([]*RTaskElement, error) {
 	now := time.Now()
 	minuteSlice := r.getMinuteSlice(now)
@@ -169,7 +173,7 @@ func (r *RTimeWheel) getExecutableTasks(ctx context.Context) ([]*RTaskElement, e
 		return nil, err
 	}
 
-	replies := gocast.ToInterfaceSlice(rawReply)
+	replies := gocast.ToInterfaceSlice(rawReply) // 0: 已删除任务集合，1: 定时任务明细
 	if len(replies) == 0 {
 		return nil, fmt.Errorf("invalid replies: %v", replies)
 	}
@@ -197,6 +201,7 @@ func (r *RTimeWheel) getExecutableTasks(ctx context.Context) ([]*RTaskElement, e
 	return tasks, nil
 }
 
+// 通过以分钟级表达式作为 {hash_tag} 的方式，确保 minuteSlice 和 deleteSet 一定会分发到相同的 redis 节点之上，进一步保证 lua 脚本的原子性能够生效
 func (r *RTimeWheel) getMinuteSlice(executeAt time.Time) string {
 	return fmt.Sprintf("xiaoxu_timewheel_task_{%s}", util.GetTimeMinuteStr(executeAt))
 }

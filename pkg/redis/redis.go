@@ -85,12 +85,18 @@ func (c *Client) SAdd(ctx context.Context, key, val string) (int, error) {
 }
 
 // Eval 支持使用 lua 脚本.
+// !lua 脚本是 redis 的高级功能，能够保证针在单个 redis 节点内执行的一系列指令具备原子性，中途不会被其他操作者打断.
+//
+//	src: lua 脚本
+//	keyCount: key 的数量
+//	keysAndArgs: key 和参数
 func (c *Client) Eval(ctx context.Context, src string, keyCount int, keysAndArgs []interface{}) (interface{}, error) {
 	args := make([]interface{}, 2+len(keysAndArgs))
 	args[0] = src
 	args[1] = keyCount
 	copy(args[2:], keysAndArgs)
 
+	// 从 redis 链接池中获取一个连接
 	conn, err := c.pool.GetContext(ctx)
 	if err != nil {
 		return -1, err

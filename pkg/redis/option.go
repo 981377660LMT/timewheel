@@ -14,6 +14,7 @@ type ClientOptions struct {
 	idleTimeoutSeconds int
 	maxActive          int
 	wait               bool
+
 	// 必填参数
 	network  string
 	address  string
